@@ -8,7 +8,7 @@
 
 //Incremental encoder input pins
 #define CHA   D7
-#define CHB   D8  
+#define CHB   D8
 
 //Motor Drive output pins   //Mask in output byte
 #define L1Lpin D4           //0x01
@@ -34,7 +34,7 @@ State   L1  L2  L3
 const int8_t driveTable[] = {0x12,0x18,0x09,0x21,0x24,0x06,0x00,0x00};
 
 //Mapping from interrupter inputs to sequential rotor states. 0x00 and 0x07 are not valid
-const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};  
+const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};
 //const int8_t stateMap[] = {0x07,0x01,0x03,0x02,0x05,0x00,0x04,0x07}; //Alternative if phase order of input or drive is reversed
 
 //Phase lead to make motor spin
@@ -47,6 +47,9 @@ DigitalOut led1(LED1);
 DigitalIn I1(I1pin);
 DigitalIn I2(I2pin);
 DigitalIn I3(I3pin);
+InterruptIn I1_interrupt(I1pin);
+InterruptIn I2_interrupt(I2pin);
+InterruptIn I3_interrupt(I3pin);
 
 //Motor Drive outputs
 DigitalOut L1L(L1Lpin);
@@ -56,6 +59,9 @@ DigitalOut L2H(L2Hpin);
 DigitalOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
+volatile uint8_t intState = 0;
+uint8_t orState;
+
 //Target parameters
 #define targetTurns (4)
 #define targetVel (0)
@@ -64,11 +70,12 @@ DigitalOut L3H(L3Hpin);
 volatile int8_t turnCount = 0;
 
 //Set a given drive state
-void motorOut(int8_t driveState){
-    
+void motorOut(int8_t driveState)
+{
+
     //Lookup the output byte from the drive state.
     int8_t driveOut = driveTable[driveState & 0x07];
-      
+
     //Turn off first
     if (~driveOut & 0x01) L1L = 0;
     if (~driveOut & 0x02) L1H = 1;
@@ -76,7 +83,7 @@ void motorOut(int8_t driveState){
     if (~driveOut & 0x08) L2H = 1;
     if (~driveOut & 0x10) L3L = 0;
     if (~driveOut & 0x20) L3H = 1;
-    
+
     //Then turn on
     if (driveOut & 0x01) L1L = 1;
     if (driveOut & 0x02) L1H = 0;
@@ -84,19 +91,21 @@ void motorOut(int8_t driveState){
     if (driveOut & 0x08) L2H = 0;
     if (driveOut & 0x10) L3L = 1;
     if (driveOut & 0x20) L3H = 0;
-    }
-    
-//Convert photointerrupter inputs to a rotor state
-inline int8_t readRotorState(){
-    return stateMap[I1 + 2*I2 + 4*I3];
-    }
+}
 
-//Basic synchronisation routine    
-int8_t motorHome() {
+//Convert photointerrupter inputs to a rotor state
+inline int8_t readRotorState()
+{
+    return stateMap[I1 + 2*I2 + 4*I3];
+}
+
+//Basic synchronisation routine
+int8_t motorHome()
+{
     //Put the motor in drive state 0 and wait for it to stabilise
     motorOut(0);
     wait(1.0);
-    
+
     //Get the rotor state
     return readRotorState();
 }
@@ -121,24 +130,86 @@ void rotateTurns()
 // - adjust speed to reach target speed
 void rotateSpeed()
 {
-	
+
 }
 
-//Main
-int main() {
-    int8_t orState = 0;    //Rotot offset at motor state 0
+void rotorStateChange_basic_isr()
+{
+    //disable interrupts
+    I1_interrupt.disable_irq();
+    I2_interrupt.disable_irq();
+    I3_interrupt.disable_irq();
+
+    intState = readRotorState(); //try with interrupt.read()
+    motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+
+    //enable interrupts
+    I1_interrupt.enable_irq();
+    I2_interrupt.enable_irq();
+    I3_interrupt.enable_irq();
+}
+
+void rotorStateChange_turns_isr()
+{
+    //disable interrupts
+    I1_interrupt.disable_irq();
+    I2_interrupt.disable_irq();
+    I3_interrupt.disable_irq();
+
+    if(turnCount < 6*targetTurns)
+    {
+        intState = readRotorState(); //try with interrupt.read()
+        motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+        turnCount++;
+    }
     
+    //enable interrupts
+    I1_interrupt.enable_irq();
+    I2_interrupt.enable_irq();
+    I3_interrupt.enable_irq();
+}
+
+
+//Main
+int main()
+{
+    int8_t orState = 0;    //Rotot offset at motor state 0
+
     //Initialise the serial port
     Serial pc(SERIAL_TX, SERIAL_RX);
-    int8_t intState = 0;
-    int8_t intStateOld = 0;
+    pc.baud(115200);
     pc.printf("Hello\n\r");
+
+//    int8_t intState = 0;
+//    int8_t intStateOld = 0;
+
+    // BASIC
+    /*
+    I1_interrupt.rise(&rotorStateChange_basic_isr);
+    I2_interrupt.rise(&rotorStateChange_basic_isr);
+    I3_interrupt.rise(&rotorStateChange_basic_isr);
+    I1_interrupt.fall(&rotorStateChange_basic_isr);
+    I2_interrupt.fall(&rotorStateChange_basic_isr);
+    I3_interrupt.fall(&rotorStateChange_basic_isr);
+    */
+    
+    // TURNS
+    
+    I1_interrupt.rise(&rotorStateChange_turns_isr);
+    I2_interrupt.rise(&rotorStateChange_turns_isr);
+    I3_interrupt.rise(&rotorStateChange_turns_isr);
+    I1_interrupt.fall(&rotorStateChange_turns_isr);
+    I2_interrupt.fall(&rotorStateChange_turns_isr);
+    I3_interrupt.fall(&rotorStateChange_turns_isr);
+    
     
     //Run the motor synchronisation
     orState = motorHome();
     pc.printf("Rotor origin: %x\n\r",orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
-    
+
+
+    /*
     //Poll the rotor state and set the motor outputs accordingly to spin the motor
     while (1) {
         intState = readRotorState();
@@ -146,11 +217,11 @@ int main() {
             intStateOld = intState;
             motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
         }
-				pc.printf("test\n\r");
+                //pc.printf("test\n\r");
     }
-    
-    
-		/*
+    */
+
+    /*
     //Poll the rotor state and set the motor outputs accordingly to spin the motor
     while (turnCount < 6*targetTurns) {
         intState = readRotorState();
@@ -161,6 +232,6 @@ int main() {
         }
         wait(0.4);
     }
-		*/
+    */
 }
 

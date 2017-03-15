@@ -24,3 +24,6 @@ Deadline 20 Mar
 - Autotune control algorithm according to mass of flywheel
 
 ### Useful links
+[Tutorial on mbed RTOS libraries] (https://docs.mbed.com/docs/mbed-os-api-reference/en/latest/APIs/tasks/rtos/)
+[Tutorial on mbed serial comms] (https://docs.mbed.com/docs/mbed-os-api-reference/en/latest/APIs/interfaces/digital/Serial/)
+[Tutorial on mbed pin/timer driven interrupts] (https://docs.mbed.com/docs/mbed-os-api-reference/en/latest/APIs/io/InterruptIn/)
