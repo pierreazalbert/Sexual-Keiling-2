@@ -44,9 +44,10 @@ const int8_t lead = -2;  //2 for forwards, -2 for backwards
 DigitalOut led1(LED1);
 
 //Photointerrupter inputs
-DigitalIn I1(I1pin);
-DigitalIn I2(I2pin);
-DigitalIn I3(I3pin);
+// DigitalIn redundant as values can be read with IX_interrupt.read()
+//DigitalIn I1(I1pin);
+//DigitalIn I2(I2pin);
+//DigitalIn I3(I3pin);
 InterruptIn I1_interrupt(I1pin);
 InterruptIn I2_interrupt(I2pin);
 InterruptIn I3_interrupt(I3pin);
@@ -94,9 +95,10 @@ void motorOut(int8_t driveState)
 }
 
 //Convert photointerrupter inputs to a rotor state
+//Changed to read InterruptIn objects
 inline int8_t readRotorState()
 {
-    return stateMap[I1 + 2*I2 + 4*I3];
+    return stateMap[I1_interrupt.read() + 2*I2_interrupt.read() + 4*I3_interrupt.read()];
 }
 
 //Basic synchronisation routine
@@ -121,7 +123,7 @@ int8_t motorHome()
 // - count rotations
 void rotateTurns()
 {
-
+    //TODO set this up to activate the irq version
 }
 
 
@@ -183,25 +185,28 @@ int main()
 //    int8_t intState = 0;
 //    int8_t intStateOld = 0;
 
-    // BASIC
-    /*
-    I1_interrupt.rise(&rotorStateChange_basic_isr);
-    I2_interrupt.rise(&rotorStateChange_basic_isr);
-    I3_interrupt.rise(&rotorStateChange_basic_isr);
-    I1_interrupt.fall(&rotorStateChange_basic_isr);
-    I2_interrupt.fall(&rotorStateChange_basic_isr);
-    I3_interrupt.fall(&rotorStateChange_basic_isr);
-    */
-    
-    // TURNS
-    
-    I1_interrupt.rise(&rotorStateChange_turns_isr);
-    I2_interrupt.rise(&rotorStateChange_turns_isr);
-    I3_interrupt.rise(&rotorStateChange_turns_isr);
-    I1_interrupt.fall(&rotorStateChange_turns_isr);
-    I2_interrupt.fall(&rotorStateChange_turns_isr);
-    I3_interrupt.fall(&rotorStateChange_turns_isr);
-    
+    const uint8_t mode = 1; //0 = basic, 1 = turns
+    //TODO change mode to an enum/get rid of it completely
+    if(mode == 0)
+    {
+        // BASIC
+        I1_interrupt.rise(&rotorStateChange_basic_isr);
+        I2_interrupt.rise(&rotorStateChange_basic_isr);
+        I3_interrupt.rise(&rotorStateChange_basic_isr);
+        I1_interrupt.fall(&rotorStateChange_basic_isr);
+        I2_interrupt.fall(&rotorStateChange_basic_isr);
+        I3_interrupt.fall(&rotorStateChange_basic_isr);
+    }
+    else if(mode == 1)
+    {
+        // TURNS
+        I1_interrupt.rise(&rotorStateChange_turns_isr);
+        I2_interrupt.rise(&rotorStateChange_turns_isr);
+        I3_interrupt.rise(&rotorStateChange_turns_isr);
+        I1_interrupt.fall(&rotorStateChange_turns_isr);
+        I2_interrupt.fall(&rotorStateChange_turns_isr);
+        I3_interrupt.fall(&rotorStateChange_turns_isr);
+    }
     
     //Run the motor synchronisation
     orState = motorHome();
