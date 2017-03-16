@@ -70,6 +70,66 @@ uint8_t orState;
 #define targetTurns (4)
 #define targetVel (0)
 
+#define CIRC_BUFFER_SIZE 64 //maximum command length is 49+endline (longest tune command)
+//Define Circular Buffer (should be 2^n for efficient wrapping to work)
+typedef struct
+{
+    uint8_t readIndex;
+    uint8_t writeIndex;
+    char data[CIRC_BUFFER_SIZE];
+    bool full;
+    bool commandReady;
+} circularBuffer_t;
+volatile circularBuffer_t circularBuffer;
+
+enum returnCode_t
+{
+    NO_ERR = 0,
+    BUFFER_EMPTY_ERROR = -1,
+    BUFFER_OVERFLOW_ERROR = -2,
+    NO_COMMAND_READY_ERROR = -3,
+    UNRECOGNISED_COMMAND_ERROR = -4,
+    PARAM_READ_ERROR = -5
+    //add more as needed
+};
+
+//Function to put a character into the circular buffer
+returnCode_t circularBufferPut(char dataIn)
+{
+    if(circularBuffer.readIndex == circularBuffer.writeIndex && circularBuffer.full)
+    {
+        return BUFFER_OVERFLOW_ERROR;
+    }
+    
+    circularBuffer.data[circularBuffer.writeIndex] = dataIn;
+    circularBuffer.writeIndex += 1; // increment index
+    circularBuffer.writeIndex &= CIRC_BUFFER_SIZE - 1; // efficient way to wrap index
+    
+    if(circularBuffer.readIndex == circularBuffer.writeIndex)
+    {
+        circularBuffer.full == true; //buffer is filled, more writes will overwrite unread data
+    }
+    
+    return NO_ERR;
+}
+
+//Function to get a character from the circular buffer
+returnCode_t circularBufferGet(char *dataOut)
+{
+    if(circularBuffer.readIndex == circularBuffer.writeIndex && !circularBuffer.full)
+    {
+        return BUFFER_EMPTY_ERROR;
+    }
+    
+    *dataOut = circularBuffer.data[circularBuffer.readIndex];
+    circularBuffer.readIndex += 1; // increment index
+    circularBuffer.readIndex &= CIRC_BUFFER_SIZE - 1; // efficient way to wrap index
+    
+    circularBuffer.full = false; //we just read something so it can't be full anymore
+    
+    return NO_ERR;
+}
+
 //
 volatile int8_t turnCount = 0;
 
@@ -115,14 +175,139 @@ int8_t motorHome()
     return readRotorState();
 }
 
-
-//Read Serial Port
+//ISR activated when a character is received by serial port
+// - reads character and puts it into the circular buffer
 void serialRx_isr()
 {
-    // Note: you need to actually read from the serial to clear the RX interrupt
-    pc.printf("%c\n", pc.getc());
-    //pc.putc( pc.getc());
+    //Read character and put into buffer
+    char charIn = pc.getc();
+    circularBufferPut(charIn);
+    
+    //If character is endline, set commandReady
+    if(charIn == '\n' || charIn == '\r')
+    {
+        circularBuffer.commandReady = true;
+    }
 }
+
+//Function to read a command
+// - reads command string from the circular buffer
+returnCode_t readCommand(char *commandString)
+{
+    //Intialise commandString
+    for (int i = 0; i < CIRC_BUFFER_SIZE; i++)
+    {
+        commandString[i] = '\0';
+    }
+    
+    //Check whether command is ready
+    if(!circularBuffer.commandReady)
+    {
+        return NO_COMMAND_READY_ERROR;
+    }
+    
+    //Read full command into commandString
+    char tempChar = '\0';
+    uint8_t commandStringLength = 0;
+    circularBufferGet(&tempChar);
+    
+    while(tempChar != '\n' && tempChar != '\r')
+    {
+        commandString[commandStringLength] = tempChar; //add char to string        
+        commandStringLength++;
+        
+        circularBufferGet(&tempChar); //get next char
+    }
+    //pc.printf("%s, length = %i\n", commandString, commandStringLength); //echo commandString
+    
+    //TODO potential bug - if the more characters have been read, incrementing writeIndex, during the command read
+    if(circularBuffer.readIndex == circularBuffer.writeIndex && !circularBuffer.full)
+    {
+        circularBuffer.commandReady = false; //we've emptied the buffer
+    }
+    
+    return NO_ERR;
+}    
+
+
+//Function to parse command
+// - parses string to acquire command/s and parameters
+returnCode_t parseCommand(char *commandString)
+{
+    //Parse string for (R-?\d{1,3}(\.\d{1,2})?)?(V\d{1,3}(\.\d{1,2})?)?(T([A-G][#\^]?[1-8]){1,16})?
+    
+    switch(commandString[0])
+    {
+        case 'R':
+        {
+            pc.printf("Rotate\n\r");
+            
+            char speedType = '\0';
+            float rotateParam = 0, speedParam = 0;
+            uint8_t numVarsFilled = sscanf(&commandString[1], "%f%1[^.0-9]%f", &rotateParam, &speedType, &speedParam); //sscanf returns the number of vars filled
+            
+            switch(numVarsFilled)
+            {
+                case 0:
+                    pc.printf("Error: Rotate parameter could not be read");
+                    return PARAM_READ_ERROR;
+                
+                case 1:
+                    pc.printf("Rotate %3.2f degrees\n\r", rotateParam);
+                    //TODO do rotation/return command somehow
+                    break;
+                
+                case 2:
+                    pc.printf("Error: Speed parameter could not be read");
+                    return PARAM_READ_ERROR;
+                
+                case 3:
+                    if(speedType != 'V')
+                    {
+                        pc.printf("Unrecognised Command (second command)\n\r");
+                        return UNRECOGNISED_COMMAND_ERROR;
+                    }
+                    
+                    pc.printf("Rotate %3.2f rotations at %3.2f rotations/sec\n\r", rotateParam, speedParam);
+                    //TODO do rotation and speed/return command somehow
+                    
+                    break;
+            } // end numVarsFilled switch
+            
+            break;
+        } // end 'R' case
+        case 'V':
+        {
+            pc.printf("Speed\n\r");
+            
+            float rotateParam = 0;
+            uint8_t numVarsFilled = sscanf(&commandString[1], "%f", &rotateParam); //sscanf returns the number of vars filled
+            
+            if(numVarsFilled == 0)
+            {
+                pc.printf("Error: Speed parameter could not be read");
+                return PARAM_READ_ERROR;
+            }
+            
+            pc.printf("Spin at %3.2f rotations/sec\n\r", rotateParam);
+            //TODO do speed/return command somehow
+
+            break;
+        } // end 'V' case
+        case 'T':
+        {
+            pc.printf("Tune\n\r");
+            break;
+        } // end 'T' case
+        default:
+        {
+            pc.printf("Unrecognised Command\n\r");
+            return UNRECOGNISED_COMMAND_ERROR;
+        }
+    }// end commandString[0] switch
+    return NO_ERR;
+}
+
 //Check Rotation
 
 //Set Rotation
@@ -192,6 +377,15 @@ int main()
 //    int8_t intState = 0;
 //    int8_t intStateOld = 0;
 
+    //initialise circular buffer;
+    circularBuffer.readIndex = 0;
+    circularBuffer.writeIndex = 0;
+    circularBuffer.full = false;
+    for (int i = 0; i < CIRC_BUFFER_SIZE; i++)
+    {
+        circularBuffer.data[i] = '\0';
+    }
+    
     //TODO change mode to an enum/get rid of it completely
     const uint8_t mode = 0; //0 = basic, 1 = turns
     if(mode == 0)
@@ -224,10 +418,19 @@ int main()
     pc.printf("Rotor origin: %x\n\r",orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 
-
+    char commandString[CIRC_BUFFER_SIZE];
+    for (int i = 0; i < CIRC_BUFFER_SIZE; i++)
+    {
+        commandString[i] = '\0';
+    }
+    
     while(1)
     {
-        
+        if(readCommand(commandString) == NO_ERR)
+        {
+            pc.printf("%s\n", commandString);
+            parseCommand(commandString);
+        }
     }
     /*
     //Poll the rotor state and set the motor outputs accordingly to spin the motor
