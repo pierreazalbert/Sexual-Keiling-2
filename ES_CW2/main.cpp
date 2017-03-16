@@ -60,6 +60,9 @@ DigitalOut L2H(L2Hpin);
 DigitalOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
+//Serial Port
+RawSerial pc(SERIAL_TX, SERIAL_RX); // RTOS interrupts don't work with Serial, RawSerial is used instead
+
 volatile uint8_t intState = 0;
 uint8_t orState;
 
@@ -114,7 +117,12 @@ int8_t motorHome()
 
 
 //Read Serial Port
-
+void serialRx_isr()
+{
+    // Note: you need to actually read from the serial to clear the RX interrupt
+    pc.printf("%c\n", pc.getc());
+    //pc.putc( pc.getc());
+}
 //Check Rotation
 
 //Set Rotation
@@ -125,7 +133,6 @@ void rotateTurns()
 {
     //TODO set this up to activate the irq version
 }
-
 
 //Control Motor Speed
 // - calculate current speed
@@ -144,7 +151,7 @@ void rotorStateChange_basic_isr()
 
     intState = readRotorState(); //try with interrupt.read()
     motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
-
+    
     //enable interrupts
     I1_interrupt.enable_irq();
     I2_interrupt.enable_irq();
@@ -178,15 +185,15 @@ int main()
     int8_t orState = 0;    //Rotot offset at motor state 0
 
     //Initialise the serial port
-    Serial pc(SERIAL_TX, SERIAL_RX);
+//    Serial pc(SERIAL_TX, SERIAL_RX);
     pc.baud(115200);
     pc.printf("Hello\n\r");
-
+    pc.attach(&serialRx_isr, Serial::RxIrq);
 //    int8_t intState = 0;
 //    int8_t intStateOld = 0;
 
-    const uint8_t mode = 1; //0 = basic, 1 = turns
     //TODO change mode to an enum/get rid of it completely
+    const uint8_t mode = 0; //0 = basic, 1 = turns
     if(mode == 0)
     {
         // BASIC
@@ -207,6 +214,10 @@ int main()
         I2_interrupt.fall(&rotorStateChange_turns_isr);
         I3_interrupt.fall(&rotorStateChange_turns_isr);
     }
+    else
+    {
+        
+    }
     
     //Run the motor synchronisation
     orState = motorHome();
@@ -214,6 +225,10 @@ int main()
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 
 
+    while(1)
+    {
+        
+    }
     /*
     //Poll the rotor state and set the motor outputs accordingly to spin the motor
     while (1) {
@@ -222,7 +237,6 @@ int main()
             intStateOld = intState;
             motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
         }
-                //pc.printf("test\n\r");
     }
     */
 
