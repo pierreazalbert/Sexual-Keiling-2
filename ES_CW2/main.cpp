@@ -1,5 +1,7 @@
 #include "mbed.h"
 #include "rtos.h"
+#include "return_codes.h"
+#include "parser.h"
 
 //Photointerrupter input pins
 #define I1pin D2
@@ -82,19 +84,8 @@ typedef struct
 } circularBuffer_t;
 volatile circularBuffer_t circularBuffer;
 
-enum returnCode_t
-{
-    NO_ERR = 0,
-    BUFFER_EMPTY_ERROR = -1,
-    BUFFER_OVERFLOW_ERROR = -2,
-    NO_COMMAND_READY_ERROR = -3,
-    UNRECOGNISED_COMMAND_ERROR = -4,
-    PARAM_READ_ERROR = -5
-    //add more as needed
-};
-
 //Function to put a character into the circular buffer
-returnCode_t circularBufferPut(char dataIn)
+returnCode_t circularBufferPut(const char dataIn)
 {
     if(circularBuffer.readIndex == circularBuffer.writeIndex && circularBuffer.full)
     {
@@ -227,85 +218,6 @@ returnCode_t readCommand(char *commandString)
     }
     
     return NO_ERR;
-}    
-
-
-//Function to parse command
-// - parses string to acquire command/s and parameters
-returnCode_t parseCommand(char *commandString)
-{
-    //Parse string for (R-?\d{1,3}(\.\d{1,2})?)?(V\d{1,3}(\.\d{1,2})?)?(T([A-G][#\^]?[1-8]){1,16})?
-    
-    switch(commandString[0])
-    {
-        case 'R':
-        {
-            pc.printf("Rotate\n\r");
-            
-            char speedType = '\0';
-            float rotateParam = 0, speedParam = 0;
-            uint8_t numVarsFilled = sscanf(&commandString[1], "%f%1[^.0-9]%f", &rotateParam, &speedType, &speedParam); //sscanf returns the number of vars filled
-            
-            switch(numVarsFilled)
-            {
-                case 0:
-                    pc.printf("Error: Rotate parameter could not be read");
-                    return PARAM_READ_ERROR;
-                
-                case 1:
-                    pc.printf("Rotate %3.2f degrees\n\r", rotateParam);
-                    //TODO do rotation/return command somehow
-                    break;
-                
-                case 2:
-                    pc.printf("Error: Speed parameter could not be read");
-                    return PARAM_READ_ERROR;
-                
-                case 3:
-                    if(speedType != 'V')
-                    {
-                        pc.printf("Unrecognised Command (second command)\n\r");
-                        return UNRECOGNISED_COMMAND_ERROR;
-                    }
-                    
-                    pc.printf("Rotate %3.2f rotations at %3.2f rotations/sec\n\r", rotateParam, speedParam);
-                    //TODO do rotation and speed/return command somehow
-                    
-                    break;
-            } // end numVarsFilled switch
-            
-            break;
-        } // end 'R' case
-        case 'V':
-        {
-            pc.printf("Speed\n\r");
-            
-            float rotateParam = 0;
-            uint8_t numVarsFilled = sscanf(&commandString[1], "%f", &rotateParam); //sscanf returns the number of vars filled
-            
-            if(numVarsFilled == 0)
-            {
-                pc.printf("Error: Speed parameter could not be read");
-                return PARAM_READ_ERROR;
-            }
-            
-            pc.printf("Spin at %3.2f rotations/sec\n\r", rotateParam);
-            //TODO do speed/return command somehow
-
-            break;
-        } // end 'V' case
-        case 'T':
-        {
-            pc.printf("Tune\n\r");
-            break;
-        } // end 'T' case
-        default:
-        {
-            pc.printf("Unrecognised Command\n\r");
-            return UNRECOGNISED_COMMAND_ERROR;
-        }
-    }// end commandString[0] switch
-    return NO_ERR;
 }
 
 //Check Rotation
@@ -423,37 +335,18 @@ int main()
     {
         commandString[i] = '\0';
     }
-    
+
     while(1)
     {
         if(readCommand(commandString) == NO_ERR)
         {
-            pc.printf("%s\n", commandString);
-            parseCommand(commandString);
+            pc.printf("%s\n\r", commandString);
+            parseCommand(commandString); //TODO actually do something about any errors returned
+        }
+        else
+        {
+            //TODO actually do something about any errors returned
         }
     }
-    /*
-    //Poll the rotor state and set the motor outputs accordingly to spin the motor
-    while (1) {
-        intState = readRotorState();
-        if (intState != intStateOld) {
-            intStateOld = intState;
-            motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
-        }
-    }
-    */
-
-    /*
-    //Poll the rotor state and set the motor outputs accordingly to spin the motor
-    while (turnCount < 6*targetTurns) {
-        intState = readRotorState();
-        if (intState != intStateOld) {
-            intStateOld = intState;
-            turnCount++;
-            motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
-        }
-        wait(0.4);
-    }
-    */
 }
 
