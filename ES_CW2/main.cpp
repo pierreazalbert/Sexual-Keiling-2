@@ -2,6 +2,7 @@
 #include "rtos.h"
 #include "return_codes.h"
 #include "parser.h"
+#include "circularBuffer.h"
 
 //Photointerrupter input pins
 #define I1pin D2
@@ -40,7 +41,7 @@ const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};
 //const int8_t stateMap[] = {0x07,0x01,0x03,0x02,0x05,0x00,0x04,0x07}; //Alternative if phase order of input or drive is reversed
 
 //Phase lead to make motor spin
-const int8_t lead = -2;  //2 for forwards, -2 for backwards
+const int8_t lead = 2;  //2 for forwards, -2 for backwards
 
 //Status LED
 DigitalOut led1(LED1);
@@ -53,6 +54,9 @@ DigitalOut led1(LED1);
 InterruptIn I1_interrupt(I1pin);
 InterruptIn I2_interrupt(I2pin);
 InterruptIn I3_interrupt(I3pin);
+
+InterruptIn CHA_interrupt(CHA);
+InterruptIn CHB_interrupt(CHB);
 
 //Motor Drive outputs
 DigitalOut L1L(L1Lpin);
@@ -72,54 +76,20 @@ uint8_t orState;
 #define targetTurns (4)
 #define targetVel (0)
 
-#define CIRC_BUFFER_SIZE 64 //maximum command length is 49+endline (longest tune command)
-//Define Circular Buffer (should be 2^n for efficient wrapping to work)
-typedef struct
-{
-    uint8_t readIndex;
-    uint8_t writeIndex;
-    char data[CIRC_BUFFER_SIZE];
-    bool full;
-    bool commandReady;
-} circularBuffer_t;
-volatile circularBuffer_t circularBuffer;
+CircularBuff circBuff; //construct circular buffer object
 
-//Function to put a character into the circular buffer
-returnCode_t circularBufferPut(const char dataIn)
-{
-    if(circularBuffer.readIndex == circularBuffer.writeIndex && circularBuffer.full)
-    {
-        return BUFFER_OVERFLOW_ERROR;
-    }
-    
-    circularBuffer.data[circularBuffer.writeIndex] = dataIn;
-    circularBuffer.writeIndex += 1; // increment index
-    circularBuffer.writeIndex &= CIRC_BUFFER_SIZE - 1; // efficient way to wrap index
-    
-    if(circularBuffer.readIndex == circularBuffer.writeIndex)
-    {
-        circularBuffer.full == true; //buffer is filled, more writes will overwrite unread data
-    }
-    
-    return NO_ERR;
-}
+//Threads
+Thread checkForAndProcessCommandsThread;
 
-//Function to get a character from the circular buffer
-returnCode_t circularBufferGet(char *dataOut)
+enum motorMode_t 
 {
-    if(circularBuffer.readIndex == circularBuffer.writeIndex && !circularBuffer.full)
-    {
-        return BUFFER_EMPTY_ERROR;
-    }
-    
-    *dataOut = circularBuffer.data[circularBuffer.readIndex];
-    circularBuffer.readIndex += 1; // increment index
-    circularBuffer.readIndex &= CIRC_BUFFER_SIZE - 1; // efficient way to wrap index
-    
-    circularBuffer.full = false; //we just read something so it can't be full anymore
-    
-    return NO_ERR;
-}
+    STOP, //stop motor
+    BASIC, //spin at full speed
+    BACKWARDS, //basic but backwards
+    ROTATE //rotate for set number of turns
+};
+
+motorMode_t motorMode = BACKWARDS;
 
 //
 volatile int8_t turnCount = 0;
@@ -170,65 +140,55 @@ int8_t motorHome()
 // - reads character and puts it into the circular buffer
 void serialRx_isr()
 {
+    I1_interrupt.disable_irq();
+    I2_interrupt.disable_irq();
+    I3_interrupt.disable_irq();
+    
     //Read character and put into buffer
     char charIn = pc.getc();
-    circularBufferPut(charIn);
+    circBuff.putChar(charIn);
     
-    //If character is endline, set commandReady
+    //If character is endline, set isCommandReady
     if(charIn == '\n' || charIn == '\r')
     {
-        circularBuffer.commandReady = true;
-    }
-}
-
-//Function to read a command
-// - reads command string from the circular buffer
-returnCode_t readCommand(char *commandString)
-{
-    //Intialise commandString
-    for (int i = 0; i < CIRC_BUFFER_SIZE; i++)
-    {
-        commandString[i] = '\0';
+        circBuff.setCommandReady(true);
     }
     
-    //Check whether command is ready
-    if(!circularBuffer.commandReady)
-    {
-        return NO_COMMAND_READY_ERROR;
-    }
-    
-    //Read full command into commandString
-    char tempChar = '\0';
-    uint8_t commandStringLength = 0;
-    circularBufferGet(&tempChar);
-    
-    while(tempChar != '\n' && tempChar != '\r')
-    {
-        commandString[commandStringLength] = tempChar; //add char to string        
-        commandStringLength++;
-        
-        circularBufferGet(&tempChar); //get next char
-    }
-    //pc.printf("%s, length = %i\n", commandString, commandStringLength); //echo commandString
-    
-    //TODO potential bug - if the more characters have been read, incrementing writeIndex, during the command read
-    if(circularBuffer.readIndex == circularBuffer.writeIndex && !circularBuffer.full)
-    {
-        circularBuffer.commandReady = false; //we've emptied the buffer
-    }
-    
-    return NO_ERR;
+    I1_interrupt.enable_irq();
+    I2_interrupt.enable_irq();
+    I3_interrupt.enable_irq();
 }
 
 //Check Rotation
 
 //Set Rotation
+void rotateFullSpeed_basic()
+{
+    intState = readRotorState();
+    motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+}
+
+void rotateFullSpeed_backwards()
+{
+    intState = readRotorState();
+    motorOut((intState-orState-lead+6)%6); //+6 to make sure the remainder is positive
+}
 
 //Set number of turns
 // - count rotations
 void rotateTurns()
 {
-    //TODO set this up to activate the irq version
+    if(turnCount < 6*targetTurns)
+    {
+        intState = readRotorState();
+        motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+        turnCount++;
+    }
+    else
+    {
+        turnCount = 0;
+        motorMode = STOP;
+    }
 }
 
 //Control Motor Speed
@@ -239,34 +199,33 @@ void rotateSpeed()
 
 }
 
-void rotorStateChange_basic_isr()
+void rotorStateChange_isr()
 {
     //disable interrupts
     I1_interrupt.disable_irq();
     I2_interrupt.disable_irq();
     I3_interrupt.disable_irq();
-
-    intState = readRotorState(); //try with interrupt.read()
-    motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
     
-    //enable interrupts
-    I1_interrupt.enable_irq();
-    I2_interrupt.enable_irq();
-    I3_interrupt.enable_irq();
-}
-
-void rotorStateChange_turns_isr()
-{
-    //disable interrupts
-    I1_interrupt.disable_irq();
-    I2_interrupt.disable_irq();
-    I3_interrupt.disable_irq();
-
-    if(turnCount < 6*targetTurns)
+    switch(motorMode)
     {
-        intState = readRotorState(); //try with interrupt.read()
-        motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
-        turnCount++;
+        case STOP:
+            break;
+        
+        case BASIC:
+            rotateFullSpeed_basic();
+            break;
+            
+        case BACKWARDS:
+            rotateFullSpeed_backwards();
+            break;
+            
+        case ROTATE:
+            rotateTurns();
+            break;
+            
+        default:
+            motorMode = STOP;
+            break;
     }
     
     //enable interrupts
@@ -275,6 +234,115 @@ void rotorStateChange_turns_isr()
     I3_interrupt.enable_irq();
 }
 
+
+//Function to read, parse and execute a command
+returnCode_t readAndProcessCommand()
+{
+    char commandString[CIRC_BUFFER_SIZE];
+
+    returnCode_t readReturn = circBuff.readCommand(commandString);
+    if(readReturn == NO_ERR)
+    {
+        pc.printf("%s\n\r", commandString); //echo command
+        
+        if(commandString[0] == 'R' || commandString[0] == 'V')
+        {
+            // ***************************************** ROTATION(/SPEED) *****************************************
+            dataSpeedOrRotateCommand_t dataSpeedOrRotateCommand;
+            returnCode_t parseReturn = parseRotateOrSpeed(commandString, &dataSpeedOrRotateCommand);
+            
+            if(parseReturn != NO_ERR)
+            {
+                pc.printf("Error: parsing \"%s\" returned code %i \n\r\tcheck return_codes.h for return code details\n\r", commandString, parseReturn);
+                return parseReturn;
+            }
+            if(dataSpeedOrRotateCommand.doRotate && dataSpeedOrRotateCommand.doSpeed)
+            {
+                pc.printf("Rotate %3.2f rotations at %3.2f rotations/sec\n\r", dataSpeedOrRotateCommand.rotateParam, dataSpeedOrRotateCommand.speedParam);
+                //TODO do the command/find a way to return this to main
+            }
+            else if(dataSpeedOrRotateCommand.doRotate)
+            {
+                pc.printf("Rotate %3.2f rotations\n\r", dataSpeedOrRotateCommand.rotateParam);
+                //TODO do the command/find a way to return this to main
+                motorMode = ROTATE;
+                rotateTurns();
+            }
+            else if(dataSpeedOrRotateCommand.doSpeed)
+            {
+                pc.printf("Spin at %3.2f rotations/sec\n\r", dataSpeedOrRotateCommand.speedParam);
+                
+                if(dataSpeedOrRotateCommand.speedParam > 0)
+                {
+                    motorMode = BASIC;
+                    rotateFullSpeed_basic();
+                }
+                else if(dataSpeedOrRotateCommand.speedParam == 0)
+                {
+                    motorMode = STOP;
+                }
+                else //(dataSpeedOrRotateCommand.speedParam < 0)
+                {
+                    motorMode = BACKWARDS;
+                    rotateFullSpeed_backwards();
+                }
+                
+            }
+            else
+            {
+                pc.printf("Warning: command returned NO_ERR, but didn't set doRotate or doSpeed\n\r");
+            }
+        }
+        else if(commandString[0] == 'T')
+        {
+            // ***************************************** TUNE *****************************************
+            dataTuneCommand_t dataTuneCommand;
+            returnCode_t parseReturn = parseTune(commandString, &dataTuneCommand);
+            
+            if(parseReturn != NO_ERR)
+            {
+                pc.printf("Error: parsing \"%s\" returned code %i \n\r\tcheck return_codes.h for return code details\n\r", commandString, parseReturn);
+                return parseReturn;
+            }
+            else
+            {
+                for(uint8_t seqIndex = 0; seqIndex < dataTuneCommand.seqLength; seqIndex++)
+                {
+                    pc.printf("Note %i: Tune %c %i for %i sec\n\r", seqIndex+1, dataTuneCommand.noteSeq[seqIndex].pitch, dataTuneCommand.noteSeq[seqIndex].pitchMod, dataTuneCommand.noteSeq[seqIndex].duration);
+                }
+                
+                //TODO do the command/find a way to return this to main
+            }
+        }
+        else
+        {
+            pc.printf("Unrecognised Command: %c\n\r", commandString[0]);
+            return UNRECOGNISED_COMMAND_ERROR;
+        }
+    }
+    else if(readReturn == NO_COMMAND_READY_ERROR)
+    {
+        return NO_COMMAND_READY_ERROR;
+    }
+    else
+    {
+        pc.printf("Error: reading command returned code %i \n\r\tcheck return_codes.h for return code details\n\r", commandString, readReturn);
+        return readReturn;
+    }
+    return NO_ERR;
+}
+
+//Thread that will run indefinitely, reading and processing commands
+void checkForAndProcessCommands_thread()
+{
+    while(1)
+    {
+        if(circBuff.getCommandReady())
+        {           
+            readAndProcessCommand();
+        }
+    }
+}
 
 //Main
 int main()
@@ -282,71 +350,25 @@ int main()
     int8_t orState = 0;    //Rotot offset at motor state 0
 
     //Initialise the serial port
-//    Serial pc(SERIAL_TX, SERIAL_RX);
     pc.baud(115200);
     pc.printf("Hello\n\r");
     pc.attach(&serialRx_isr, Serial::RxIrq);
-//    int8_t intState = 0;
-//    int8_t intStateOld = 0;
+   
+    I1_interrupt.rise(&rotorStateChange_isr);
+    I2_interrupt.rise(&rotorStateChange_isr);
+    I3_interrupt.rise(&rotorStateChange_isr);
+    I1_interrupt.fall(&rotorStateChange_isr);
+    I2_interrupt.fall(&rotorStateChange_isr);
+    I3_interrupt.fall(&rotorStateChange_isr);
 
-    //initialise circular buffer;
-    circularBuffer.readIndex = 0;
-    circularBuffer.writeIndex = 0;
-    circularBuffer.full = false;
-    for (int i = 0; i < CIRC_BUFFER_SIZE; i++)
-    {
-        circularBuffer.data[i] = '\0';
-    }
-    
-    //TODO change mode to an enum/get rid of it completely
-    const uint8_t mode = 0; //0 = basic, 1 = turns
-    if(mode == 0)
-    {
-        // BASIC
-        I1_interrupt.rise(&rotorStateChange_basic_isr);
-        I2_interrupt.rise(&rotorStateChange_basic_isr);
-        I3_interrupt.rise(&rotorStateChange_basic_isr);
-        I1_interrupt.fall(&rotorStateChange_basic_isr);
-        I2_interrupt.fall(&rotorStateChange_basic_isr);
-        I3_interrupt.fall(&rotorStateChange_basic_isr);
-    }
-    else if(mode == 1)
-    {
-        // TURNS
-        I1_interrupt.rise(&rotorStateChange_turns_isr);
-        I2_interrupt.rise(&rotorStateChange_turns_isr);
-        I3_interrupt.rise(&rotorStateChange_turns_isr);
-        I1_interrupt.fall(&rotorStateChange_turns_isr);
-        I2_interrupt.fall(&rotorStateChange_turns_isr);
-        I3_interrupt.fall(&rotorStateChange_turns_isr);
-    }
-    else
-    {
-        
-    }
     
     //Run the motor synchronisation
     orState = motorHome();
     pc.printf("Rotor origin: %x\n\r",orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 
-    char commandString[CIRC_BUFFER_SIZE];
-    for (int i = 0; i < CIRC_BUFFER_SIZE; i++)
-    {
-        commandString[i] = '\0';
-    }
+    
+    checkForAndProcessCommandsThread.start(checkForAndProcessCommands_thread);
 
-    while(1)
-    {
-        if(readCommand(commandString) == NO_ERR)
-        {
-            pc.printf("%s\n\r", commandString);
-            parseCommand(commandString); //TODO actually do something about any errors returned
-        }
-        else
-        {
-            //TODO actually do something about any errors returned
-        }
-    }
 }
 
