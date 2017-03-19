@@ -21,6 +21,9 @@
 #define L3Lpin D9           //0x10
 #define L3Hpin D10          //0x20
 
+#define NUM_RELATIVE_POSITION_STATES 468
+#define SPEED_MEASURE_TIMEOUT_MS 200
+
 //Mapping from sequential drive states to motor phase outputs
 /*
 State   L1  L2  L3
@@ -85,14 +88,37 @@ enum motorMode_t
 {
     STOP, //stop motor
     BASIC, //spin at full speed
-    BACKWARDS, //basic but backwards
+    BASIC_BACKWARDS, //basic but backwards
     ROTATE //rotate for set number of turns
 };
 
-motorMode_t motorMode = BACKWARDS;
+enum direction_t
+{
+    FORWARDS = 1,
+    STATIONARY = 0,
+    BACKWARDS = -1,
+    INVALID = 2,
+};
+
+motorMode_t motorMode = STOP;
 
 //
 volatile int8_t turnCount = 0;
+
+typedef struct
+{
+    volatile bool A; //CHA
+    volatile bool B; //CHB
+    volatile bool oldA;
+    volatile bool oldB;
+    
+    volatile uint8_t state;
+    volatile uint8_t oldState;
+    
+    volatile uint8_t numChanges;
+    
+} relativePosition_t;
+relativePosition_t relativePosition;
 
 //Set a given drive state
 void motorOut(int8_t driveState)
@@ -123,6 +149,24 @@ void motorOut(int8_t driveState)
 inline int8_t readRotorState()
 {
     return stateMap[I1_interrupt.read() + 2*I2_interrupt.read() + 4*I3_interrupt.read()];
+}
+
+//Update the relative position values
+void updateRelativePositionStates_isr()
+{
+    //set stored values as old values
+    relativePosition.oldA = relativePosition.A;
+    relativePosition.oldB = relativePosition.B;
+    
+    //set current values
+    relativePosition.A = CHA_interrupt.read();
+    relativePosition.B = CHB_interrupt.read();
+    
+    relativePosition.state = relativePosition.B*2 + (relativePosition.B^relativePosition.A);
+    relativePosition.oldState = relativePosition.oldB*2 + (relativePosition.oldB^relativePosition.oldA);
+    
+        
+    relativePosition.numChanges++; //increment number of changes
 }
 
 //Basic synchronisation routine
@@ -159,7 +203,52 @@ void serialRx_isr()
     I3_interrupt.enable_irq();
 }
 
-//Check Rotation
+//measure the direction and speed of rotor spin (including no spin)
+void readSpeedAndDirection(direction_t *directionResult)
+{
+    //uint32_t oldNumChanges = relativePosition.numChanges;
+    Timer speedTimer;
+    relativePosition.numChanges = 0;
+    
+    CHA_interrupt.enable_irq();
+    CHB_interrupt.enable_irq();
+    speedTimer.start();
+    while(relativePosition.numChanges < NUM_RELATIVE_POSITION_STATES && speedTimer.read_ms() < SPEED_MEASURE_TIMEOUT_MS) 
+    {
+        //do nothing, just wait for interrupts/timeout to occur
+    }
+    speedTimer.stop();
+    CHA_interrupt.disable_irq();
+    CHB_interrupt.disable_irq();
+    
+    float timerValue = speedTimer.read();
+    float speed_rotationsPerSec = ((float)relativePosition.numChanges/NUM_RELATIVE_POSITION_STATES) / timerValue;
+    pc.printf("%i position changes, %f s clock, %f rotations/s \n\r", relativePosition.numChanges, timerValue, speed_rotationsPerSec);
+        
+    //combine state values and convert from gray code to normal binary
+    uint8_t relativePositionState = relativePosition.B*2 + (relativePosition.B^relativePosition.A);
+    uint8_t oldRelativePositionState = relativePosition.oldB*2 + (relativePosition.oldB^relativePosition.oldA);
+    
+    int8_t stateDifference = relativePositionState - oldRelativePositionState;
+    if(stateDifference == 0)
+    {
+        *directionResult = STATIONARY;          
+    }
+    else if(stateDifference == 1 || stateDifference == -3)
+    {
+        *directionResult = FORWARDS;
+    }
+    else if(stateDifference == -1 || stateDifference == 3)
+    {
+        *directionResult = BACKWARDS;
+    }
+    else
+    {
+        *directionResult = INVALID;
+        //should never occur
+    }
+}
+
 
 //Set Rotation
 void rotateFullSpeed_basic()
@@ -215,7 +304,7 @@ void rotorStateChange_isr()
             rotateFullSpeed_basic();
             break;
             
-        case BACKWARDS:
+        case BASIC_BACKWARDS:
             rotateFullSpeed_backwards();
             break;
             
@@ -233,7 +322,6 @@ void rotorStateChange_isr()
     I2_interrupt.enable_irq();
     I3_interrupt.enable_irq();
 }
-
 
 //Function to read, parse and execute a command
 returnCode_t readAndProcessCommand()
@@ -283,10 +371,9 @@ returnCode_t readAndProcessCommand()
                 }
                 else //(dataSpeedOrRotateCommand.speedParam < 0)
                 {
-                    motorMode = BACKWARDS;
+                    motorMode = BASIC_BACKWARDS;
                     rotateFullSpeed_backwards();
                 }
-                
             }
             else
             {
@@ -314,6 +401,37 @@ returnCode_t readAndProcessCommand()
                 //TODO do the command/find a way to return this to main
             }
         }
+        // ************ TESTING COMMANDS ************
+        else if (commandString[0] == 'D') // command tells which direction rotor is spinning
+        {
+            direction_t direction;
+            readSpeedAndDirection(&direction);
+            switch(direction)
+            {
+                case FORWARDS:
+                    pc.printf("Forwards\n\r");
+                    break;
+                case BACKWARDS:
+                    pc.printf("Backwards\n\r");
+                    break;
+                case STATIONARY:
+                    pc.printf("Stationary\n\r");
+                    break;
+                default:
+                    pc.printf("WARNING: INVALID CASE\n\r");
+                    break;
+            }   
+        }
+        else if (commandString[0] == 'H') // command tells which direction rotor is spinning
+        {
+            pc.printf(
+            "'V' - Spin at a set speed e.g. 'V-10' to rotate in reverse at 10 rot/s\n\r"
+            "'R' - Rotate a set number of rotations e.g. 'R5' to rotate 5 times\n\r"
+            "'T' - To play a tune e.g. 'TA#4B2' to play A# for 4 sec and then B for 2 sec\n\r"
+            "'D' - TESTING COMMAND to print speed and direction of rotor spin\n\r"
+            "'H' - TESTING COMMAND to print list of possible commands\n\r"
+            );
+        }    
         else
         {
             pc.printf("Unrecognised Command: %c\n\r", commandString[0]);
@@ -344,6 +462,7 @@ void checkForAndProcessCommands_thread()
     }
 }
 
+
 //Main
 int main()
 {
@@ -360,7 +479,14 @@ int main()
     I1_interrupt.fall(&rotorStateChange_isr);
     I2_interrupt.fall(&rotorStateChange_isr);
     I3_interrupt.fall(&rotorStateChange_isr);
-
+    
+    CHA_interrupt.rise(&updateRelativePositionStates_isr);
+    CHB_interrupt.rise(&updateRelativePositionStates_isr);
+    CHA_interrupt.fall(&updateRelativePositionStates_isr);
+    CHB_interrupt.fall(&updateRelativePositionStates_isr);
+    CHA_interrupt.disable_irq(); //disable interrupt until needed
+    CHB_interrupt.disable_irq(); //disable interrupt until needed
+    
     
     //Run the motor synchronisation
     orState = motorHome();
