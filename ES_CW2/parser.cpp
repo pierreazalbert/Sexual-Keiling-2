@@ -101,35 +101,34 @@ returnCode_t parseTune(const char *commandString, dataTuneCommand_t *dataTuneCom
     
         // ***************************************** TUNE *****************************************
         int commandIndex = 1; //this is used to navigate through the entire command, we skip the first char as we know this is T
-        
         uint8_t seqIndex = 0;
-        
-        
-        
-        while(commandString[commandIndex] != '\0' && seqIndex < 16) //until end of command
+                
+        while(commandString[commandIndex] != '\0') //until end of command
         {
-            // CHARACTER 1
-            if(commandString[commandIndex] < 0x41 || commandString[commandIndex] > 0x47) //if not between A and G inclusive
+            if(seqIndex >= MAX_NOTE_SEQUENCE_LENGTH)
             {
-                //pc.printf("Error: Note parameter could not be read \n\r\t%c must be char between A and G \n\r", commandString[commandIndex]);
-                // COULDN'T READ PITCH, NEEDS TO BE CHAR BETWEEN A AND G
+                return EXCEED_MAX_NOTE_SEQ_LENGTH;
+            }
+            
+            // CHARACTER 1
+            dataTuneCommand->noteSeq[seqIndex].pitch = charToPitch(commandString[commandIndex]);
+            if(dataTuneCommand->noteSeq[seqIndex].pitch == INVALID_PITCH)
+            {
                 return INVALID_PITCH_NOTE_ERROR;
             }
-            dataTuneCommand->noteSeq[seqIndex].pitch = commandString[commandIndex];
             commandIndex++;  //move to next character
             
             // CHARACTER 2 - PITCHMOD OR DURATION
             if(commandString[commandIndex] == '^')
             {
-                dataTuneCommand->noteSeq[seqIndex].pitchMod = FLAT;
+                dataTuneCommand->noteSeq[seqIndex].pitch = (pitch_t)(dataTuneCommand->noteSeq[seqIndex].pitch + 1); //change to next pitch_t value
             }
             else if(commandString[commandIndex] == '#')
             {
-                dataTuneCommand->noteSeq[seqIndex].pitchMod = SHARP;                
+                dataTuneCommand->noteSeq[seqIndex].pitch = (pitch_t)(dataTuneCommand->noteSeq[seqIndex].pitch - 1); //change to prev pitch_t value
             }
             else if(commandString[commandIndex] >= 0x31 && commandString[commandIndex] <= 0x38)
             {
-                dataTuneCommand->noteSeq[seqIndex].pitchMod = STANDARD;
                 dataTuneCommand->noteSeq[seqIndex].duration = commandString[commandIndex] - 0x30; // convert UTF-8 to int
             }
             else if(commandString[commandIndex] == '\0')
@@ -145,7 +144,7 @@ returnCode_t parseTune(const char *commandString, dataTuneCommand_t *dataTuneCom
             commandIndex++; //move to next character
             
             // CHARACTER 3 - DURATION, ONLY OCCURS IF PREVIOUS CHARACTER WAS # or ^
-            if(dataTuneCommand->noteSeq[seqIndex].pitchMod != STANDARD)
+            if(commandString[commandIndex-1] == '^' || commandString[commandIndex-1] == '#')
             {
                 if(commandString[commandIndex] >= 0x31 && commandString[commandIndex] <= 0x38)
                 {
@@ -165,12 +164,10 @@ returnCode_t parseTune(const char *commandString, dataTuneCommand_t *dataTuneCom
                 commandIndex++;  //move to next character
             }
             
-            //pc.printf("Note %i: Tune %c %i for %i sec\n\r", seqIndex, noteSeq[seqIndex].pitch, noteSeq[seqIndex].pitchMod, noteSeq[seqIndex].duration);
             seqIndex++; //move to next note in the sequence
         }// end of while
         
         dataTuneCommand->seqLength = seqIndex;
-        
     }// end commandString[0] switch
     else
     { 
